@@ -1,0 +1,146 @@
+# Ouvidoria Municipal - ambiente segmentado com firewall iptables
+# Subir: docker compose up -d --build
+name: ouvidoria
+
+services:
+
+  # ---------------- FIREWALL / GATEWAY ----------------
+  firewall:
+    build: ./firewall
+    container_name: fw-ouvidoria
+    cap_add:
+      - NET_ADMIN                       # permite usar iptables
+    sysctls:
+      - net.ipv4.ip_forward=1           # liga o roteamento entre as redes
+    volumes:
+      - ./firewall/firewall.sh:/firewall.sh:ro   # regras carregadas na subida
+    networks:
+      rede_internet:
+        ipv4_address: 203.0.113.254
+      rede_lan:
+        ipv4_address: 10.10.10.254
+      rede_dmz:
+        ipv4_address: 10.10.20.254
+
+  # ---------------- DMZ ----------------
+  web:
+    build: ./web
+    container_name: dmz-web
+    environment:
+      DB_HOST: 10.10.20.20
+      DB_NAME: ouvidoria
+      DB_USER: ouvidoria_leitura        # usuário SOMENTE LEITURA
+      DB_PASS: ${DB_READ_PASSWORD:?defina no arquivo .env}
+    depends_on:
+      - db
+    networks:
+      rede_dmz:
+        ipv4_address: 10.10.20.10
+
+  db:
+    image: mysql:8.4
+    container_name: dmz-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?defina no arquivo .env}
+      MYSQL_ROOT_HOST: localhost        # root não acessa pela rede
+      MYSQL_DATABASE: ouvidoria
+      # senhas dos usuários criados em db/init/02-usuarios.sh
+      DB_READ_PASSWORD: ${DB_READ_PASSWORD:?defina no arquivo .env}
+      DB_PAINEL_PASSWORD: ${DB_PAINEL_PASSWORD:?defina no arquivo .env}
+      DB_SISTEMA_PASSWORD: ${DB_SISTEMA_PASSWORD:?defina no arquivo .env}
+    volumes:
+      - dados_mysql:/var/lib/mysql                     # dados persistentes
+      - ./db/init:/docker-entrypoint-initdb.d:ro       # tabelas e usuários
+    networks:
+      rede_dmz:
+        ipv4_address: 10.10.20.20
+
+  phpmyadmin:
+    image: phpmyadmin:5.2
+    container_name: dmz-phpmyadmin
+    environment:
+      PMA_HOST: 10.10.20.20
+    depends_on:
+      - db
+    networks:
+      rede_dmz:
+        ipv4_address: 10.10.20.30
+
+  # ---------------- LAN DA PREFEITURA ----------------
+  # Sistema interno da ouvidoria: cadastra, altera, exclui e visualiza
+  sistema-interno:
+    build: ./sistema-interno
+    container_name: lan-sistema
+    cap_add:
+      - NET_ADMIN                       # só para criar a rota via firewall
+    environment:
+      DB_HOST: 10.10.20.20
+      DB_NAME: ouvidoria
+      DB_USER: ouvidoria_sistema        # leitura e escrita
+      DB_PASS: ${DB_SISTEMA_PASSWORD:?defina no arquivo .env}
+    depends_on:
+      - firewall
+      - db
+    networks:
+      rede_lan:
+        ipv4_address: 10.10.10.20
+
+  # Estação de trabalho de um servidor da ouvidoria
+  estacao-lan:
+    build: ./ferramentas
+    container_name: lan-estacao
+    cap_add:
+      - NET_ADMIN                       # só para criar a rota via firewall
+    command: sh -c "ip route replace 10.10.20.0/24 via 10.10.10.254 && exec sleep infinity"
+    depends_on:
+      - firewall
+    networks:
+      rede_lan:
+        ipv4_address: 10.10.10.10
+
+  # ---------------- INTERNET ----------------
+  # Cidadão acessando pela Internet
+  cidadao:
+    build: ./ferramentas
+    container_name: net-cidadao
+    depends_on:
+      - firewall
+    networks:
+      rede_internet:
+        ipv4_address: 203.0.113.50
+
+  # ---------------- TESTE ----------------
+  # Simula um servidor da DMZ invadido (teste da regra de ouro da DMZ)
+  dmz-invasor:
+    build: ./ferramentas
+    container_name: dmz-invasor
+    cap_add:
+      - NET_ADMIN
+    command: sh -c "ip route replace 10.10.10.0/24 via 10.10.20.254 && exec sleep infinity"
+    depends_on:
+      - firewall
+    networks:
+      rede_dmz:
+        ipv4_address: 10.10.20.99
+
+networks:
+  rede_internet:                        # simula a Internet
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 203.0.113.0/24
+  rede_lan:                             # rede interna da prefeitura
+    driver: bridge
+    internal: true                      # sem saída direta: só via firewall
+    ipam:
+      config:
+        - subnet: 10.10.10.0/24
+  rede_dmz:                             # zona desmilitarizada
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.10.20.0/24
+
+volumes:
+  dados_mysql:
