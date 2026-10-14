@@ -1,5 +1,6 @@
 -- Estrutura e dados de exemplo da Ouvidoria Municipal
 -- (executado automaticamente na primeira subida do MySQL)
+SET NAMES utf8mb4;
 USE ouvidoria;
 
 CREATE TABLE manifestacoes (
